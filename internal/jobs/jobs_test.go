@@ -447,3 +447,26 @@ func TestReserveReleases(t *testing.T) {
 		tk.Release()
 	}
 }
+
+func TestRestartDeletesUploads(t *testing.T) {
+	cases := []string{"chunked-0123456789abcdef0123456789abcdef.zip", "upload-123.zip", "stray"}
+	cfg := testConfig(t)
+	up := filepath.Join(cfg.WorkDir, "uploads")
+	os.MkdirAll(up, 0o700)
+	for _, name := range cases {
+		if err := os.WriteFile(filepath.Join(up, name), []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := New(cfg, &testutil.FakeRunner{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(up)
+	if len(ents) != 0 {
+		t.Fatalf("%d upload files left after restart", len(ents))
+	}
+	if m.Reserved() != 0 {
+		t.Fatalf("reserved %d", m.Reserved())
+	}
+}

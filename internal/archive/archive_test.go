@@ -231,6 +231,8 @@ func TestCentralDirCheck(t *testing.T) {
 		{"only an end record", eocd(5000, 100, 0), 100, 0, "before or inside"},
 		{"zip64 size does not reach end record", zip64Tail(1<<40, 100), 100, 0, "before or inside"},
 		{"zip64 bad record", append(make([]byte, 56), zip64Tail(1, 1)[56:]...), 100, 0, "zip64"},
+		{"zip64 locator points after itself", zip64LocAfter(), 100, 0, "bad zip64 locator"},
+		{"zero count, non-empty directory", forgeEnd(twenty, 0, 0, 0, false), 100, 0, "declares 0 entries"},
 		{"not a zip", []byte("hello, this is not a zip archive at all"), 100, 0, "not a zip"},
 		{"empty file", nil, 100, 0, "not a zip"},
 		{"truncated record", append(append(le32(centralSig), make([]byte, 10)...), eocd(1, 14, 0)...), 100, 0, "truncated"},
@@ -282,13 +284,33 @@ func TestBaseOffsetExploit(t *testing.T) {
 	if n != 65536 {
 		t.Fatalf("fixture is not an exploit: archive/zip sees %d files", n)
 	}
+	// The preflight alone rejects it; Unzip runs the preflight before
+	// zip.OpenReader.
+	if err := checkCentralDir(src, 1000); err == nil || !strings.Contains(err.Error(), "before or inside the central directory") {
+		t.Fatalf("preflight: %v", err)
+	}
 	err = Unzip(src, dst, Limits{MaxExpandedBytes: 1 << 30, MaxFiles: 1000})
 	if err == nil || !strings.Contains(err.Error(), "before or inside the central directory") {
 		t.Fatalf("err = %v", err)
 	}
+
+	// Same records, honest offset: the count wrapped to 0 and is refused.
+	cdOffset := binary.LittleEndian.Uint64(rec[48:])
+	honest := append(append([]byte(nil), z[:recAt]...), eocd(0, uint32(cdSize), uint32(cdOffset))...)
+	src2, _ := writeZip(t, honest)
+	if err := checkCentralDir(src2, 1<<20); err == nil || !strings.Contains(err.Error(), "declares 0 entries") {
+		t.Fatalf("wrapped count: %v", err)
+	}
 	if ents, _ := os.ReadDir(dst); len(ents) != 0 {
 		t.Fatal("files were extracted")
 	}
+}
+
+// zip64LocAfter returns ZIP64 end records whose locator points past itself.
+func zip64LocAfter() []byte {
+	b := zip64Tail(0, 0)
+	binary.LittleEndian.PutUint64(b[56+8:], 60) // record "at" the locator
+	return b
 }
 
 func le32(v uint32) []byte { b := make([]byte, 4); binary.LittleEndian.PutUint32(b, v); return b }

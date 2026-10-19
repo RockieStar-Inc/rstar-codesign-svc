@@ -65,3 +65,32 @@ func TestCheckFilesP8Mode(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUploadPartBytes(t *testing.T) {
+	ok := "      api_key_path: /x.p8\n      key_id: ABCDE12345\n      issuer_id: 6053b7fe-68a8-4acb-89be-165aa6465141"
+	cases := []struct {
+		name  string
+		extra string
+		want  int64 // 0: must be rejected
+	}{
+		{"default", "", 64 << 20},
+		{"95 MiB is the cap", "upload_part_bytes: 99614720\n", 95 << 20},
+		{"over the cap", "upload_part_bytes: 99614721\n", 0},
+		{"negative", "upload_part_bytes: -1\n", 0},
+		{"small", "upload_part_bytes: 1024\n", 1024},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(c.extra + strings.Replace(base, "%s", ok, 1)))
+			if c.want == 0 {
+				if err == nil {
+					t.Fatal("accepted")
+				}
+				return
+			}
+			if err != nil || cfg.UploadPartBytes != c.want {
+				t.Fatalf("%v %v", cfg, err)
+			}
+		})
+	}
+}

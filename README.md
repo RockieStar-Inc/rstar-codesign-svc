@@ -53,6 +53,9 @@ directory.
 | Method and path | Auth | Result |
 |---|---|---|
 | `POST /v1/jobs` | OIDC token or access key | `202 {"id", "job_token"}`. Multipart fields, in this order: `profile`, then `file` (a zip with one `.app` at its root). A `Content-Length` header is required. `401` bad or reused token, `403` not allowed, `408` upload stalled, `411` no `Content-Length`, `413` too big, `429` queue full, `503` low disk. |
+| `POST /v1/uploads` | OIDC token or access key | Start a chunked upload. JSON `{"profile", "size", "sha256"}`. Same checks and admission as `POST /v1/jobs`. `201 {"upload_id", "upload_token", "part_size", "parts"}`. |
+| `PUT /v1/uploads/{id}/parts/{n}` | upload token | Part `n` (0 to `parts`-1), exactly `part_size` bytes except the last. Re-sending a part overwrites it. `204`. |
+| `POST /v1/uploads/{id}/complete` | upload token | Checks that all parts arrived and the size and SHA-256 match, then creates the job: `202 {"id", "job_token"}` like `POST /v1/jobs`. The upload token is dead after this. |
 | `GET /v1/jobs/{id}` | job token | `{"id", "status", "error", "profile", "bundle_id", "artifacts": {"zip": {"sha256", "notary_id"}, "dmg": {...}}, "signing_report": [{"path", "type", "entitlements", "warning"}]}`. Status is `queued`, `signing`, `notarizing`, `done` or `failed`. |
 | `GET /v1/jobs/{id}/artifact?kind=zip\|dmg` | job token | The file. |
 | `GET /healthz` | none | `{"status":"ok"}` |
@@ -60,6 +63,14 @@ directory.
 
 A wrong job token and an unknown job both return `404`. Job tokens expire
 with the job (`result_ttl`).
+
+**Chunked uploads.** Proxies such as Cloudflare Tunnel refuse request
+bodies over 100 MB, and an app zip is often bigger. So the client uploads
+in parts of `upload_part_bytes` (default 64 MiB, at most 95 MiB). The queue
+slot and disk reservation are taken when the upload starts. An upload with
+no activity for `upload_timeout` is dropped, with its slot, reservation and
+file; a restart drops all unfinished uploads. `POST /v1/jobs` stays for
+small uploads and direct connections. The client script always uses parts.
 
 ## Security model
 
@@ -208,7 +219,8 @@ example `signer`. Do not run CI runners on this Mac.
 
 6. **Expose it.** Use a tunnel, for example Cloudflare Tunnel
    (`cloudflared tunnel --url http://127.0.0.1:8787`, or a named tunnel with a
-   hostname). The service has no TLS of its own.
+   hostname). The service has no TLS of its own. Uploads go up in parts of
+   at most 95 MiB, so the 100 MB body limit of Cloudflare does not apply.
 
 7. **Smoke test.** Sign a known app from an allowed repo and ref. Then call
    from a repo or branch that is not allowed and check that you get `403`.
@@ -237,8 +249,9 @@ key id and name.
 
 ## Clients
 
-Both clients use [`clients/sign.sh`](clients/sign.sh) (POSIX `sh` and
-`curl`). Every `curl` call has a connect timeout and a time limit inside the
+Both clients use [`clients/sign.sh`](clients/sign.sh) (POSIX `sh`, `curl`
+and `dd`). It uploads in parts and retries a part up to 3 times after a
+network error or a 5xx; any other error fails the step. Every `curl` call has a connect timeout and a time limit inside the
 overall deadline (`timeout-minutes`).
 
 After download, on macOS, the client checks the result:

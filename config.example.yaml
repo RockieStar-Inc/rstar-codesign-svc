@@ -8,8 +8,11 @@ audit_log: /Users/signer/codesign-svc/audit.jsonl
 queue_size: 5                   # waiting jobs; more returns 429
 result_ttl: 24h                 # results and job tokens expire after this
 job_timeout: 2h                 # whole job, notarization polling included
-upload_timeout: 30m             # a stalled upload gives its queue slot back
+upload_timeout: 30m             # a stalled upload, or a chunked upload idle
+                                # this long, gives its slot and disk back
 max_upload_bytes: 2147483648    # 2 GiB
+upload_part_bytes: 67108864     # 64 MiB per upload part; at most 95 MiB, so
+                                # proxies with a 100 MB body limit pass it
 max_expanded_bytes: 4294967296  # 4 GiB unpacked
 max_files: 200000
 min_free_bytes: 21474836480     # 20 GiB floor. Each admitted job reserves

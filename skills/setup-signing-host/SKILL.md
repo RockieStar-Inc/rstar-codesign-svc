@@ -119,7 +119,8 @@ config, `.p8` readable by others, work dir writable by others).
 The service listens on `127.0.0.1` and has no TLS. Expose it with a tunnel,
 for example a named Cloudflare Tunnel that maps `codesign.example.com` to
 `http://127.0.0.1:8787`. Run the tunnel as its own LaunchAgent or service.
-Raise the tunnel's request body limit if uploads are near 100 MB or more.
+Uploads arrive in parts of `upload_part_bytes` (default 64 MiB, at most
+95 MiB), so Cloudflare's 100 MB request body limit is not a problem.
 
 ## 7. Smoke test
 
