@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for codesign-svc. Install it for the dedicated signing user:
+
+    cp deploy/codesign-svc.plist ~/Library/LaunchAgents/local.codesign-svc.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.codesign-svc.plist
+
+  It must be a LaunchAgent in that user's GUI (Aqua) session, not a
+  LaunchDaemon: codesign run from a daemon cannot use the keychain and fails
+  with errSecInternalComponent. Turn on automatic login for the user so the
+  session exists after a reboot.
+
+  Replace /Users/signer with the user's home directory.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.codesign-svc</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/codesign-svc</string>
+		<string>-config</string>
+		<string>/Users/signer/codesign-svc/config.yaml</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<!-- Optional: unlock the signing keychain before each job.
+		     The file must be mode 0600 and owned by this user.
+		<key>CODESIGN_KEYCHAIN_PASSWORD_FILE</key>
+		<string>/Users/signer/codesign-svc/keychain-password</string>
+		-->
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/signer/codesign-svc/codesign-svc.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/signer/codesign-svc/codesign-svc.log</string>
+</dict>
+</plist>

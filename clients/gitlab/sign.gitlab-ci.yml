@@ -1,0 +1,34 @@
+# GitLab CI template for codesign-svc.
+#
+# Use:
+#   include:
+#     - remote: https://raw.githubusercontent.com/<owner>/<repo>/<tag>/clients/gitlab/sign.gitlab-ci.yml
+#   sign-macos:
+#     extends: .codesign
+#     needs: [build-macos]
+#     variables:
+#       CODESIGN_URL: https://codesign.example.com
+#       CODESIGN_PROFILE: example-release
+#       CODESIGN_PATH: dist/Example.app
+#     rules:
+#       - if: $CI_COMMIT_TAG =~ /^v/
+#
+# The job image needs sh and curl, plus zip when CODESIGN_PATH is a .app
+# on Linux. The client script is fetched from the service itself, so it
+# always matches the server version. The ID token audience must match the
+# issuer audience in the service config; change `aud` if yours differs.
+.codesign:
+  id_tokens:
+    CODESIGN_ID_TOKEN:
+      aud: codesign
+  variables:
+    CODESIGN_OUTPUT_DIR: signed
+    CODESIGN_TIMEOUT_MIN: "90"
+  timeout: 2h
+  script:
+    - curl -fsSL "${CODESIGN_URL%/}/client/sign.sh" -o "$CI_PROJECT_DIR/.codesign-sign.sh"
+    - sh "$CI_PROJECT_DIR/.codesign-sign.sh"
+  artifacts:
+    paths:
+      - $CODESIGN_OUTPUT_DIR/
+    expire_in: 1 week

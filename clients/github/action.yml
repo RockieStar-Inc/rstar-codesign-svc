@@ -1,0 +1,60 @@
+name: codesign-svc sign and notarize
+description: Sign, notarize and staple a macOS .app with a self-hosted codesign-svc. No Apple secrets in CI.
+inputs:
+  url:
+    description: Base URL of the codesign-svc service.
+    required: true
+  profile:
+    description: Signing profile name on the service.
+    required: true
+  path:
+    description: Path to the .app, or a .zip with one .app at its root.
+    required: true
+  audience:
+    description: OIDC audience the service expects.
+    default: codesign
+  output-dir:
+    description: Directory for the signed zip (and DMG when the profile builds one).
+    default: signed
+  access-key:
+    description: Optional access key (csk_...). Pass it from secrets. When empty, the job uses GitHub OIDC and needs `permissions id-token write`.
+    default: ""
+  timeout-minutes:
+    description: How long the whole step may take.
+    default: "90"
+  verify:
+    description: On macOS, check the result with codesign --verify, spctl and stapler validate. "1" or "0".
+    default: "1"
+  smoke-timeout:
+    description: Seconds the smoke command may run before it and its children are killed.
+    default: "300"
+  smoke-command:
+    description: Optional shell command run on macOS after download, with $APP set to the signed .app. Use it to start bundled executables (for example `"$APP/Contents/Resources/node/bin/node" --version`). A non-zero exit fails the step.
+    default: ""
+outputs:
+  zip:
+    description: Path to the signed, notarized, stapled zip.
+    value: ${{ steps.sign.outputs.zip }}
+  dmg:
+    description: Path to the signed, notarized, stapled DMG, if the profile builds one.
+    value: ${{ steps.sign.outputs.dmg }}
+  job-id:
+    description: The service job id.
+    value: ${{ steps.sign.outputs.job-id }}
+runs:
+  using: composite
+  steps:
+    - id: sign
+      shell: sh
+      env:
+        CODESIGN_URL: ${{ inputs.url }}
+        CODESIGN_PROFILE: ${{ inputs.profile }}
+        CODESIGN_PATH: ${{ inputs.path }}
+        CODESIGN_AUDIENCE: ${{ inputs.audience }}
+        CODESIGN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        CODESIGN_ACCESS_KEY: ${{ inputs.access-key }}
+        CODESIGN_TIMEOUT_MIN: ${{ inputs.timeout-minutes }}
+        CODESIGN_VERIFY: ${{ inputs.verify }}
+        CODESIGN_SMOKE_CMD: ${{ inputs.smoke-command }}
+        CODESIGN_SMOKE_TIMEOUT: ${{ inputs.smoke-timeout }}
+      run: sh "$GITHUB_ACTION_PATH/../sign.sh"

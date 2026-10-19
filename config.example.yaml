@@ -1,0 +1,103 @@
+# codesign-svc example config. Copy to config.yaml and edit.
+# All paths are absolute. Durations use Go syntax: 90s, 30m, 24h.
+
+listen: 127.0.0.1:8787          # keep on localhost; expose with a tunnel
+work_dir: /Users/signer/codesign-svc/work      # created with mode 0700
+audit_log: /Users/signer/codesign-svc/audit.jsonl
+
+queue_size: 5                   # waiting jobs; more returns 429
+result_ttl: 24h                 # results and job tokens expire after this
+job_timeout: 2h                 # whole job, notarization polling included
+upload_timeout: 30m             # a stalled upload gives its queue slot back
+max_upload_bytes: 2147483648    # 2 GiB
+max_expanded_bytes: 4294967296  # 4 GiB unpacked
+max_files: 200000
+min_free_bytes: 21474836480     # 20 GiB floor. Each admitted job reserves
+                                # upload + 3 x max_expanded_bytes; new jobs get
+                                # 503 when free disk minus reservations is
+                                # below this. See README "Disk sizing".
+max_retained_jobs: 20           # oldest finished jobs are deleted first
+
+# OIDC issuers. kind is github or gitlab (inferred when empty).
+issuers:
+  - url: https://token.actions.githubusercontent.com
+    kind: github
+    audience: codesign
+  - url: https://gitlab.com
+    kind: gitlab
+    audience: codesign
+
+# Deny by default. A request passes when one rule matches all fields.
+# refs are globs ("*" does not cross "/").
+# require_protected_ref defaults to true.
+# events defaults to [push, workflow_dispatch, release] on GitHub and
+# [push, web] on GitLab. Pull request events are denied unless listed.
+allow:
+  - issuer: https://token.actions.githubusercontent.com
+    repo: example-org/example-app
+    refs: [refs/heads/main, refs/tags/v*]
+    profiles: [example-release]
+    # Optional: only this workflow file may sign. "*" does not cross "/".
+    workflow_refs:
+      - example-org/example-app/.github/workflows/release.yml@refs/heads/main
+      - example-org/example-app/.github/workflows/release.yml@refs/tags/*
+  - issuer: https://gitlab.com
+    repo: example-group/example-app
+    refs: [refs/tags/v*]
+    profiles: [example-release]
+
+# Signing profiles. Clients pick a profile by name; they cannot pass an
+# identity or entitlements.
+profiles:
+  - name: example-release
+    identity: "Developer ID Application: Example Corp (TEAMID1234)"   # or the cert SHA-1
+    keychain: /Users/signer/Library/Keychains/signing.keychain-db
+    team_id: TEAMID1234
+    allowed_bundle_ids: [com.example.app]   # globs allowed; nested bundles must be com.example.app.*
+    hardened_runtime: true
+    # Entitlements:
+    #   entitlements          the main app only.
+    #   inherit_entitlements  every nested .app/.xpc/.appex and every
+    #                         standalone executable (MH_EXECUTE). Same as
+    #                         electron-builder's entitlementsInherit.
+    #   entitlement_overrides first match by path (relative to the .app)
+    #                         wins over inherit_entitlements.
+    # Frameworks, dylibs and plugins (MH_BUNDLE) never get entitlements.
+    #
+    # Electron apps: set inherit_entitlements to the same plist as
+    # electron-builder's entitlementsInherit. Any bundled Node or V8 binary
+    # (for example Contents/Resources/node/bin/node) needs
+    # com.apple.security.cs.allow-jit, or it crashes at start under the
+    # hardened runtime. The job status lists every signed path in
+    # signing_report and warns about executables without entitlements.
+    entitlements: /Users/signer/codesign-svc/entitlements/app.plist
+    inherit_entitlements: /Users/signer/codesign-svc/entitlements/inherit.plist
+    entitlement_overrides:
+      - match: "Contents/Frameworks/* Helper (GPU).app"
+        entitlements: /Users/signer/codesign-svc/entitlements/helper-gpu.plist
+    # Notary credentials: set exactly one option.
+    notary:
+      # Option B (recommended): App Store Connect API key, owned by the
+      # service user, mode 0600.
+      api_key_path: /Users/signer/codesign-svc/AuthKey_ABCDE12345.p8
+      key_id: ABCDE12345
+      issuer_id: 00000000-0000-0000-0000-000000000000
+      # Option A: a profile saved with `xcrun notarytool store-credentials`.
+      # keychain_profile: example-notary
+      # keychain: /Users/signer/Library/Keychains/signing.keychain-db
+    dmg: true                     # also build, sign, notarize, staple a DMG
+    volume_name: Example
+
+# Access keys: fallback auth for CI without OIDC. Off by default.
+# Manage with `codesign-svc keys create|list|revoke`.
+access_keys:
+  enabled: false
+  file: /Users/signer/codesign-svc/access-keys.json
+
+# Static token for local testing only. Never enable in production.
+# Add an allow rule with `issuer: dev` and the repo/ref below to use it.
+dev_mode:
+  enabled: false
+  token_env: CODESIGN_DEV_TOKEN
+  repo: local/test
+  ref: refs/heads/main
