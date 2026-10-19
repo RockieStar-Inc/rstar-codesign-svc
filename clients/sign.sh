@@ -79,6 +79,10 @@ json_field() { # json_field NAME < json  (flat string fields only)
 	sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"
 }
 
+json_num() { # json_num NAME < json  (flat integer fields only)
+	sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"
+}
+
 credential() {
 	if [ -n "${CODESIGN_ACCESS_KEY:-}" ]; then
 		printf '%s' "$CODESIGN_ACCESS_KEY"
@@ -136,18 +140,64 @@ case "$CODESIGN_PATH" in
 *) die "CODESIGN_PATH must be a .app directory or a .zip" ;;
 esac
 
-# 2. Create the job. The profile field must come before the file.
+# 2. Upload in parts, then create the job. Proxies such as Cloudflare refuse
+# request bodies over 100 MB, so the zip goes up in parts of part_size bytes.
+case "$CODESIGN_PROFILE" in *[!A-Za-z0-9._-]*) die "CODESIGN_PROFILE may hold only letters, digits, '.', '_' and '-'" ;; esac
+SIZE=$(wc -c <"$ZIP" | tr -d ' ')
+ZIP_SHA=$(sha256 "$ZIP")
 CRED=$(credential)
 [ -n "$CRED" ] || die "could not get a credential"
-note "uploading $NAME to $BASE (profile $CODESIGN_PROFILE)"
-code=$(fetch 0 -o "$TMP/create.json" -w '%{http_code}' -X POST \
-	-H "@$(header_file "$CRED" cred)" \
-	-F "profile=$CODESIGN_PROFILE" \
-	-F "file=@$ZIP;type=application/zip" \
-	"$BASE/v1/jobs") || die "upload failed"
+note "uploading $NAME ($SIZE bytes) to $BASE (profile $CODESIGN_PROFILE)"
+code=$(fetch 60 -o "$TMP/upload.json" -w '%{http_code}' -X POST \
+	-H "@$(header_file "$CRED" cred)" -H 'Content-Type: application/json' \
+	--data "{\"profile\":\"$CODESIGN_PROFILE\",\"size\":$SIZE,\"sha256\":\"$ZIP_SHA\"}" \
+	"$BASE/v1/uploads") || die "start upload failed"
 CRED=
 rm -f "$TMP/auth.cred" "$TMP/auth.gh"
-[ "$code" = 202 ] || die "create job: HTTP $code: $(cat "$TMP/create.json")"
+[ "$code" = 201 ] || die "start upload: HTTP $code: $(cat "$TMP/upload.json")"
+UP_ID=$(json_field upload_id <"$TMP/upload.json")
+UP_TOKEN=$(json_field upload_token <"$TMP/upload.json")
+PART_SIZE=$(json_num part_size <"$TMP/upload.json")
+PARTS=$(json_num parts <"$TMP/upload.json")
+rm -f "$TMP/upload.json"
+case "$UP_ID" in *[!0-9a-f]* | "") die "bad upload id from service" ;; esac
+case "$PART_SIZE$PARTS" in *[!0-9]* | "") die "bad part size from service" ;; esac
+[ "$PART_SIZE" -gt 0 ] && [ -n "$UP_TOKEN" ] || die "bad upload reply from service"
+UP_HDR=$(header_file "$UP_TOKEN" up)
+
+# put_part N uploads $TMP/part as part N. Network errors and 5xx are retried
+# up to 3 times; any other status fails the run.
+put_part() {
+	attempt=1
+	while :; do
+		[ $((DEADLINE - $(date +%s))) -gt 0 ] || die "timed out after $TIMEOUT_MIN minutes"
+		pcode=$(fetch 600 -o "$TMP/part.json" -w '%{http_code}' -T "$TMP/part" \
+			-H "@$UP_HDR" -H 'Content-Type: application/octet-stream' \
+			"$BASE/v1/uploads/$UP_ID/parts/$1") || pcode=000
+		[ "$pcode" != 204 ] || return 0
+		case "$pcode" in
+		000 | 5??) ;;
+		*) die "part $1: HTTP $pcode: $(cat "$TMP/part.json" 2>/dev/null)" ;;
+		esac
+		[ "$attempt" -le 3 ] || die "part $1: failed after $attempt attempts (last HTTP $pcode)"
+		note "part $1: HTTP $pcode, retry $attempt of 3"
+		sleep $((attempt * 2))
+		attempt=$((attempt + 1))
+	done
+}
+
+n=0
+while [ "$n" -lt "$PARTS" ]; do
+	dd if="$ZIP" of="$TMP/part" bs="$PART_SIZE" skip="$n" count=1 2>/dev/null || die "could not read part $n"
+	put_part "$n"
+	n=$((n + 1))
+	note "uploaded part $n/$PARTS"
+done
+rm -f "$TMP/part" "$TMP/part.json"
+code=$(fetch 0 -o "$TMP/create.json" -w '%{http_code}' -X POST -H "@$UP_HDR" \
+	"$BASE/v1/uploads/$UP_ID/complete") || die "complete upload failed"
+rm -f "$UP_HDR"
+[ "$code" = 202 ] || die "complete upload: HTTP $code: $(cat "$TMP/create.json")"
 JOB_ID=$(json_field id <"$TMP/create.json")
 JOB_TOKEN=$(json_field job_token <"$TMP/create.json")
 rm -f "$TMP/create.json"

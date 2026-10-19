@@ -19,6 +19,10 @@ const (
 	KindDev    = "dev"
 )
 
+// MaxUploadPartBytes is the hard cap for one upload part: 95 MiB, under the
+// 100 MB request body limit of common proxies.
+const MaxUploadPartBytes = 95 << 20
+
 // GitHubIssuer is the GitHub Actions OIDC issuer.
 const GitHubIssuer = "https://token.actions.githubusercontent.com"
 
@@ -31,6 +35,7 @@ type Config struct {
 	JobTimeout       time.Duration `yaml:"job_timeout"`
 	UploadTimeout    time.Duration `yaml:"upload_timeout"`
 	MaxUploadBytes   int64         `yaml:"max_upload_bytes"`
+	UploadPartBytes  int64         `yaml:"upload_part_bytes"`
 	MaxExpandedBytes int64         `yaml:"max_expanded_bytes"`
 	MaxFiles         int           `yaml:"max_files"`
 	MinFreeBytes     int64         `yaml:"min_free_bytes"`
@@ -179,6 +184,9 @@ func (c *Config) applyDefaults() {
 	if c.MaxUploadBytes == 0 {
 		c.MaxUploadBytes = 2 << 30
 	}
+	if c.UploadPartBytes == 0 {
+		c.UploadPartBytes = 64 << 20
+	}
 	if c.MaxExpandedBytes == 0 {
 		c.MaxExpandedBytes = 4 << 30
 	}
@@ -209,6 +217,9 @@ func (c *Config) Validate() error {
 	var errs []error
 	if c.WorkDir == "" {
 		errs = append(errs, errors.New("work_dir is required"))
+	}
+	if c.UploadPartBytes < 1 || c.UploadPartBytes > MaxUploadPartBytes {
+		errs = append(errs, fmt.Errorf("upload_part_bytes must be between 1 and %d (proxies such as Cloudflare refuse bodies over 100 MB)", MaxUploadPartBytes))
 	}
 	if c.AccessKeys.Enabled && c.AccessKeys.File == "" {
 		errs = append(errs, errors.New("access_keys.file is required when access keys are enabled"))

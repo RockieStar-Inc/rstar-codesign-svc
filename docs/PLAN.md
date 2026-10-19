@@ -30,7 +30,12 @@ CI job ◀──轮询状态，下载结果──
 
 ## API
 
-- `POST /v1/jobs`：`Authorization: Bearer <OIDC token>`；multipart：`file`（含一个 `.app` 的 zip）、`profile`。返回 `202 {id}`；队列满返回 429。
+- `POST /v1/jobs`：`Authorization: Bearer <OIDC token>`；multipart：`file`（含一个 `.app` 的 zip）、`profile`。返回 `202 {id}`；队列满返回 429。只用于小文件和直连。
+- 分块上传（Cloudflare Tunnel 拒绝超过 100 MB 的请求体）：
+  - `POST /v1/uploads`：同样的鉴权、白名单、重放检查和名额／磁盘预留；JSON `{profile, size, sha256}`；返回 `{upload_id, upload_token, part_size, parts}`。`part_size` 默认 64 MiB（`upload_part_bytes`），上限 95 MiB。
+  - `PUT /v1/uploads/{id}/parts/{n}`：用 upload token；每块按偏移写进一个预分配文件；同一块可重传覆盖。
+  - `POST /v1/uploads/{id}/complete`：检查块齐全、大小和 sha256，然后像 `POST /v1/jobs` 一样建任务；upload token 随即作废。
+  - 闲置超过 `upload_timeout` 的上传被丢弃，释放名额、预留和文件；重启时也丢弃。
 - `GET /v1/jobs/{id}`：`queued|signing|notarizing|done|failed`、错误、公证 id、输出 sha256。只有创建它的仓库能读。
 - `GET /v1/jobs/{id}/artifact?kind=zip|dmg`：下载结果。
 - `GET /healthz`。
@@ -54,7 +59,7 @@ CI job ◀──轮询状态，下载结果──
 
 ## 客户端
 
-- `clients/sign.sh`：共用脚本（打包、上传、轮询、下载）。
+- `clients/sign.sh`：共用脚本（打包、分块上传、轮询、下载、校验）。每块网络错误或 5xx 最多重试 3 次，其他错误直接失败。
 - `clients/github/action.yml`：composite action，要 `permissions: id-token: write`。
 - `clients/gitlab/sign.gitlab-ci.yml`：`id_tokens` 模板。
 
@@ -113,6 +118,15 @@ CI job ◀──轮询状态，下载结果──
 - 第一次：签名、公证、staple、`spctl`、`syspolicy_check` 全部通过，但包里的 Node 启动即崩溃（hardened runtime 下没有 `allow-jit`）。公证查不出这种问题。
 - 修复后：App 和 DMG 都是 `Notarized Developer ID`；客户端自检通过；smoke 命令运行 Node 的 JIT 循环通过；从 DMG 拷出 App 后台启动，Node 子进程正常运行、应用接口有响应；正常退出。
 - 一次任务约 6 分钟（两次公证）。
+
+## 部署后的真实测试（2026-10-19）
+
+服务跑在专用 Mac 上（LaunchAgent，专用钥匙串，只放一个 Developer ID 身份），经 Cloudflare Tunnel 对外：
+
+- 用 login 钥匙串时 `codesign` 报 `errSecInternalComponent`。改用专用钥匙串（`set-keychain-settings` 不自动上锁，`set-key-partition-list`，密码文件 0600，每个任务开头解锁）后通过。
+- 一次上传 800 MB 被 Cloudflare 拒绝：HTTP 413（请求体上限 100 MB）。加了分块上传（`POST /v1/uploads`，每块最多 95 MiB）。下载不受这个限制。
+- 分块上传后：App 和 DMG 都是 `Notarized Developer ID`；`codesign --verify --deep --strict` 通过；嵌套的 helper、framework、Node 都带 hardened runtime 和同一个团队 ID；entitlements 与源文件一致；`syspolicy_check distribution` 通过。
+- 给 App 加上 quarantine 标记后启动（和浏览器下载的一样），Gatekeeper 放行；主进程、helper、renderer、Node 子进程都在运行，应用接口在监听；正常退出，没有崩溃报告。
 
 ## 参考 asc CLI（rorkai/App-Store-Connect-CLI）的做法
 

@@ -44,6 +44,7 @@ func identity(jti string) auth.Identity {
 
 type env struct {
 	srv    *httptest.Server
+	api    *Server
 	m      *jobs.Manager
 	r      *testutil.FakeRunner
 	cfg    *config.Config
@@ -57,7 +58,7 @@ func newEnv(t *testing.T, queue int, start bool) *env {
 	cfg := &config.Config{
 		WorkDir: filepath.Join(dir, "work"), AuditLog: filepath.Join(dir, "audit.jsonl"),
 		QueueSize: queue, ResultTTL: time.Hour, JobTimeout: time.Minute, UploadTimeout: time.Minute,
-		MaxUploadBytes: 1 << 20, MaxExpandedBytes: 1 << 24, MaxFiles: 1000,
+		MaxUploadBytes: 1 << 20, UploadPartBytes: 4096, MaxExpandedBytes: 1 << 24, MaxFiles: 1000,
 		MinFreeBytes: 1, MaxRetainedJobs: 20,
 		Allow: []config.Rule{{Issuer: gh, Repo: "example/app", Refs: []string{"refs/heads/main"}, Profiles: []string{"release"}}},
 		Profiles: []config.Profile{{
@@ -102,9 +103,10 @@ func newEnv(t *testing.T, queue int, start bool) *env {
 	fa["key-release"] = auth.Identity{Issuer: auth.KeyIssuer, Kind: auth.KindKey, KeyID: "k1", KeyName: "ci", KeyProfiles: []string{"release"}}
 	fa["key-other"] = auth.Identity{Issuer: auth.KeyIssuer, Kind: auth.KindKey, KeyID: "k2", KeyName: "ci2", KeyProfiles: []string{"other"}}
 	fa["client-secret-zq9"] = identity("jti-client")
-	srv := httptest.NewServer(New(cfg, fa, m, []byte("#!/bin/sh\n")).Handler())
+	api := New(cfg, fa, m, []byte("#!/bin/sh\n"))
+	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
-	return &env{srv: srv, m: m, r: r, cfg: cfg, ctx: ctx, cancel: cancel}
+	return &env{srv: srv, api: api, m: m, r: r, cfg: cfg, ctx: ctx, cancel: cancel}
 }
 
 func appZip(t *testing.T, topID string) []byte {

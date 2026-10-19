@@ -74,8 +74,8 @@ func readEnd(f *os.File, size int64) (endRecord, error) {
 		return end, nil
 	}
 	recAt := binary.LittleEndian.Uint64(loc[8:])
-	if recAt > uint64(size) {
-		return endRecord{}, errors.New("bad zip64 locator")
+	if recAt > uint64(size) || recAt+zip64EOCDBytes > eocdPos-zip64LocLen {
+		return endRecord{}, errors.New("bad zip64 locator: end record must come before the locator")
 	}
 	var rec [zip64EOCDBytes]byte
 	if _, err := f.ReadAt(rec[:], int64(recAt)); err != nil {
@@ -113,8 +113,15 @@ func checkCentralDir(path string, maxFiles int) error {
 	if err != nil {
 		return err
 	}
+	// archive/zip finds the directory at endPos - size; it must be the
+	// declared offset (base offset 0).
 	if end.offset > end.endPos || end.size != end.endPos-end.offset {
 		return errors.New("archive has data before or inside the central directory")
+	}
+	// A zero count with a non-empty directory is either a lie or a count
+	// that wrapped at 65536; refuse both.
+	if end.entries == 0 && end.size > 0 {
+		return errors.New("zip end record declares 0 entries but the central directory is not empty")
 	}
 	if end.size > maxCentralDirBytes {
 		return fmt.Errorf("zip central directory is larger than %d bytes", maxCentralDirBytes)

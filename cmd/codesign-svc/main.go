@@ -71,9 +71,11 @@ func serve(cfgPath string) error {
 	defer stop()
 	m.Start(ctx)
 
+	api := server.New(cfg, auth.NewVerifier(cfg, nil), m, clients.SignScript)
+	go api.Run(ctx)
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(cfg, auth.NewVerifier(cfg, nil), m, clients.SignScript).Handler(),
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	errc := make(chan error, 1)

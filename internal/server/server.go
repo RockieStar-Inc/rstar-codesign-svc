@@ -28,17 +28,20 @@ type Authenticator interface {
 }
 
 type Server struct {
-	cfg    *config.Config
-	auth   Authenticator
-	jobs   *jobs.Manager
-	replay *auth.ReplayCache
-	script []byte
+	cfg     *config.Config
+	auth    Authenticator
+	jobs    *jobs.Manager
+	replay  *auth.ReplayCache
+	script  []byte
+	uploads uploadStore
+	now     func() time.Time
 }
 
 // New builds the server. script is the client script served at
 // /client/sign.sh (may be nil).
 func New(cfg *config.Config, a Authenticator, m *jobs.Manager, script []byte) *Server {
-	return &Server{cfg: cfg, auth: a, jobs: m, replay: auth.NewReplayCache(), script: script}
+	return &Server{cfg: cfg, auth: a, jobs: m, replay: auth.NewReplayCache(), script: script,
+		uploads: uploadStore{m: map[string]*upload{}}, now: time.Now}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -55,6 +58,9 @@ func (s *Server) Handler() http.Handler {
 		w.Write(s.script)
 	})
 	mux.HandleFunc("POST /v1/jobs", s.createJob)
+	mux.HandleFunc("POST /v1/uploads", s.createUpload)
+	mux.HandleFunc("PUT /v1/uploads/{id}/parts/{n}", s.putPart)
+	mux.HandleFunc("POST /v1/uploads/{id}/complete", s.completeUpload)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /v1/jobs/{id}/artifact", s.getArtifact)
 	return mux
@@ -69,29 +75,8 @@ type createResponse struct {
 // multipart body must send the "profile" field before the "file" field, so
 // the allowlist is checked before the upload is stored.
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
-	raw, ok := bearer(r)
+	id, ok := s.authenticate(w, r)
 	if !ok {
-		writeErr(w, http.StatusUnauthorized, "missing bearer token")
-		return
-	}
-	id, err := s.auth.Verify(r.Context(), raw)
-	if err != nil {
-		status := http.StatusUnauthorized
-		if !errors.Is(err, auth.ErrUnauthorized) {
-			status = http.StatusBadGateway
-		}
-		log.Printf("auth failed: %v", err)
-		writeErr(w, status, err.Error())
-		return
-	}
-	// Identity checks come before any slot or disk is taken.
-	if ok, reason := auth.AllowedAny(s.cfg.Allow, id); !ok {
-		log.Printf("denied %s %s@%s: %s", id.Issuer, id.Repo, id.Ref, reason)
-		writeErr(w, http.StatusForbidden, reason)
-		return
-	}
-	if err := s.replay.Check(id); err != nil {
-		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 	if r.ContentLength < 0 {
@@ -103,26 +88,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "upload is too large")
 		return
 	}
-	// The upload plus up to max_expanded_bytes for each of: the unpacked
-	// app, the notary and output zips, and the DMG staging copy plus DMG.
-	ticket, err := s.jobs.Reserve(r.ContentLength + 3*s.cfg.MaxExpandedBytes)
-	switch {
-	case errors.Is(err, jobs.ErrQueueFull):
-		writeErr(w, http.StatusTooManyRequests, err.Error())
-		return
-	case errors.Is(err, jobs.ErrDiskLow):
-		writeErr(w, http.StatusServiceUnavailable, err.Error())
-		return
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	ticket, ok := s.admit(w, id, r.ContentLength)
+	if !ok {
 		return
 	}
 	defer ticket.Release()
-	// Burn the token only now: a 429 or 503 above leaves it usable.
-	if err := s.replay.Use(id); err != nil {
-		writeErr(w, http.StatusUnauthorized, err.Error())
-		return
-	}
 
 	// A stalled upload must not hold the slot forever.
 	rc := http.NewResponseController(w)
@@ -278,6 +248,62 @@ func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(p)}))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, "", st.ModTime(), f)
+}
+
+// authenticate checks the bearer token, the identity part of the allowlist
+// and (read-only) replay. Nothing is reserved yet.
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (auth.Identity, bool) {
+	raw, ok := bearer(r)
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "missing bearer token")
+		return auth.Identity{}, false
+	}
+	id, err := s.auth.Verify(r.Context(), raw)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if !errors.Is(err, auth.ErrUnauthorized) {
+			status = http.StatusBadGateway
+		}
+		log.Printf("auth failed: %v", err)
+		writeErr(w, status, err.Error())
+		return auth.Identity{}, false
+	}
+	if ok, reason := auth.AllowedAny(s.cfg.Allow, id); !ok {
+		log.Printf("denied %s %s@%s: %s", id.Issuer, id.Repo, id.Ref, reason)
+		writeErr(w, http.StatusForbidden, reason)
+		return auth.Identity{}, false
+	}
+	if err := s.replay.Check(id); err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return auth.Identity{}, false
+	}
+	return id, true
+}
+
+// admit takes a queue slot and reserves disk for an upload of uploadBytes:
+// the upload plus up to max_expanded_bytes for each of the unpacked app, the
+// notary and output zips, and the DMG staging copy plus DMG. Only then is the
+// token burned, so a 429 or 503 leaves it usable. The caller releases the
+// ticket unless it hands it to a job.
+func (s *Server) admit(w http.ResponseWriter, id auth.Identity, uploadBytes int64) (*jobs.Ticket, bool) {
+	ticket, err := s.jobs.Reserve(uploadBytes + 3*s.cfg.MaxExpandedBytes)
+	switch {
+	case errors.Is(err, jobs.ErrQueueFull):
+		writeErr(w, http.StatusTooManyRequests, err.Error())
+		return nil, false
+	case errors.Is(err, jobs.ErrDiskLow):
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return nil, false
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if err := s.replay.Use(id); err != nil {
+		ticket.Release()
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return nil, false
+	}
+	return ticket, true
 }
 
 // writeBodyErr maps a request body error to a status.
